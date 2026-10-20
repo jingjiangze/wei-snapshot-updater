@@ -1,4 +1,4 @@
-name: update-snapshot
+name: update-snapshot # triggers: schedule + dispatch
 
 # 每半小时拉一次上游服务器列表，更新静态快照并重新部署 Pages。
 # 快照是前端在实时 API 不可用时的兜底数据源（见 wei-replica 的 app.js refresh()）。
