@@ -1,11 +1,12 @@
 name: update-snapshot # triggers: schedule + dispatch
 
-# 每 5 分钟拉一次上游服务器列表，更新静态快照并重新部署 Pages。
+# 每 10 分钟拉一次上游服务器列表，更新静态快照并重新部署 Pages。
+# （内容级跳过：无实质变化不 commit 不 deploy，所以最坏 144 次/天、实际远低于此。）
 # 快照即「列表」唯一数据源（前端不再走 /api/servers），pin 一律绿 + 并行直探真实人数。
 # Workers/Pages Functions 只留给后台管理与投票。
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '*/10 * * * *'
   workflow_dispatch: {}
 
 permissions:

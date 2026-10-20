@@ -14,7 +14,7 @@ wei.jiangjiangze.icu 服务器列表「静态快照」的自动更新器。
 4. （不做玩家端探测——https 页面 fetch 国内 http 服会被混合内容墙拦）
 
 ## 工作方式
-GitHub Actions 每 30 分钟：拉上游（主源 `http://121.4.51.247`，备源域名）→ 数据有变化才 commit → wrangler 全量部署到 Pages（文件总量 ~90KB，全量部署开销可忽略）。
+GitHub Actions 每 10 分钟：拉上游（主源 `http://121.4.51.247`，备源域名）→ 数据有变化才 commit → wrangler 全量部署到 Pages（文件总量 ~90KB，全量部署开销可忽略）。
 
 ## Secrets
 - `CF_API_TOKEN`：Pages 部署权限的 CF API Token
