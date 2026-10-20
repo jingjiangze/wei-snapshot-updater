@@ -2,6 +2,8 @@ name: update-snapshot # triggers: schedule + dispatch
 
 # 每半小时拉一次上游服务器列表，更新静态快照并重新部署 Pages。
 # 快照是前端在实时 API 不可用时的兜底数据源（见 wei-replica 的 app.js refresh()）。
+# FORCED_ONLINE：上游/CF 边缘探测够不到的服（三服、六服），由 Actions runner 直探真值后强制绿，
+# 名单与 wei-replica functions/api/_lib.js 的同名常量保持一致。
 on:
   schedule:
     - cron: '*/30 * * * *'
@@ -34,6 +36,7 @@ jobs:
             exit 0
           fi
           SRC="$SRC" node - <<'JS'
+          (async () => {
           const fs = require('fs');
           const up = JSON.parse(fs.readFileSync('/tmp/up.json', 'utf8'));
           if (!Array.isArray(up.servers) || !up.servers.length) {
@@ -47,8 +50,56 @@ jobs:
             snapshot: true,
             snapshotSource: process.env.SRC || 'unknown',
           };
+
+          // ---- FORCED_ONLINE pin（与 _lib.js 同一批 id）----
+          const FORCED_ONLINE = new Set(['8b8c624a6a525a67', 'server-4']);
+          for (const s of out.servers) {
+            if (!FORCED_ONLINE.has(s.id)) continue;
+            let real = null;
+            let latencyMs = null;
+            try {
+              const base = String(s.url || '').endsWith('/') ? String(s.url || '') : String(s.url || '') + '/';
+              const path = String(s.statusPath || '/healthz');
+              const u = new URL(path.startsWith('/') ? path.slice(1) : path, base);
+              const t0 = Date.now();
+              const r = await fetch(u.href, {
+                signal: AbortSignal.timeout(8000),
+                headers: { 'user-agent': 'wei-snapshot/1.0', 'cache-control': 'no-cache' },
+              });
+              latencyMs = Date.now() - t0;
+              if (r.ok) {
+                const d = await r.json();
+                if (d && (d.ok === true || typeof d.online === 'number')) real = d;
+              }
+            } catch (err) {
+              console.log('pin probe failed for', s.id, ':', String((err && err.message) || err).slice(0, 80));
+            }
+            s.status = {
+              ...(s.status || {}),
+              state: 'online',
+              error: null,
+              httpStatus: null,
+              forced: true,
+              checkedAt: Date.now(),
+              latencyMs,
+              countKind: (s.status && s.status.countKind) || 'connections',
+            };
+            if (real) {
+              s.status.online = Number(real.online ?? real.humans ?? real.sockets ?? 0) || 0;
+              s.status.rooms = Number(real.rooms ?? 0) || 0;
+              s.status.matches = Number(real.matches ?? 0) || 0;
+              if (real.app) s.status.version = real.app;
+              console.log('pin', s.id, 'real:', JSON.stringify({ online: s.status.online, rooms: s.status.rooms, matches: s.status.matches, latencyMs }));
+            } else {
+              console.log('pin', s.id, 'forced green (real probe unavailable)');
+            }
+            if (Array.isArray(s.history24h)) s.history24h = s.history24h.map(([t, on]) => [t, on ?? 1, 1]);
+            s.uptime24h = 100;
+          }
+
           fs.writeFileSync('site/data/servers-snapshot.json', JSON.stringify(out));
           console.log('snapshot written:', out.servers.length, 'servers from', out.snapshotSource);
+          })();
           JS
           echo "SRC=$SRC" >> "$GITHUB_ENV"
 
