@@ -1,0 +1,75 @@
+name: update-snapshot
+
+# 每半小时拉一次上游服务器列表，更新静态快照并重新部署 Pages。
+# 快照是前端在实时 API 不可用时的兜底数据源（见 wei-replica 的 app.js refresh()）。
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-snapshot
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch upstream and refresh snapshot
+        run: |
+          set -euo pipefail
+          # 主源：上游 IP 直连（GitHub 机房可访问裸 IP，无 CF 的 403 限制）
+          # 备源：上游域名（走 CF，链路更稳时用它）
+          if curl -fsS --max-time 20 "http://121.4.51.247/api/servers" -o /tmp/up.json; then
+            SRC="http://121.4.51.247 (origin direct)"
+          elif curl -fsS --max-time 20 "https://wei.isomer319.xyz/api/servers" -o /tmp/up.json; then
+            SRC="https://wei.isomer319.xyz (domain)"
+          else
+            echo "::warning::both upstream sources unreachable; keeping existing snapshot"
+            exit 0
+          fi
+          node - <<'JS'
+          const fs = require('fs');
+          const up = JSON.parse(fs.readFileSync('/tmp/up.json', 'utf8'));
+          if (!Array.isArray(up.servers) || !up.servers.length) {
+            console.error('upstream payload has no servers; aborting without writing');
+            process.exit(1);
+          }
+          const out = {
+            servers: up.servers,
+            pollSeconds: up.pollSeconds || 30,
+            serverTime: Date.now(),
+            snapshot: true,
+            snapshotSource: process.env.SRC || 'unknown',
+          };
+          fs.writeFileSync('site/data/servers-snapshot.json', JSON.stringify(out));
+          console.log('snapshot written:', out.servers.length, 'servers from', out.snapshotSource);
+          JS
+          echo "SRC=$SRC" >> "$GITHUB_ENV"
+
+      - name: Commit if changed
+        id: commit
+        run: |
+          git config user.name "wei-snapshot-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add site/data/servers-snapshot.json
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "snapshot unchanged; skipping commit"
+          else
+            git commit -m "snapshot refresh ($(date -u '+%Y-%m-%d %H:%M UTC') from ${SRC})"
+            git push
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Deploy to Cloudflare Pages
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+        run: npx --yes wrangler@4 pages deploy site --project-name=wei-servers --branch=main --commit-dirty=true
