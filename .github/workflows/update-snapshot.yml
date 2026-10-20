@@ -33,7 +33,7 @@ jobs:
             echo "::warning::both upstream sources unreachable; keeping existing snapshot"
             exit 0
           fi
-          node - <<'JS'
+          SRC="$SRC" node - <<'JS'
           const fs = require('fs');
           const up = JSON.parse(fs.readFileSync('/tmp/up.json', 'utf8'));
           if (!Array.isArray(up.servers) || !up.servers.length) {
