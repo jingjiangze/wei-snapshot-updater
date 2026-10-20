@@ -1,11 +1,11 @@
 name: update-snapshot # triggers: schedule + dispatch
 
-# 每半小时拉一次上游服务器列表，更新静态快照并重新部署 Pages。
+# 每 5 分钟拉一次上游服务器列表，更新静态快照并重新部署 Pages。
 # 快照即「列表」唯一数据源（前端不再走 /api/servers），pin 一律绿 + 并行直探真实人数。
 # Workers/Pages Functions 只留给后台管理与投票。
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -95,6 +95,22 @@ jobs:
           };
           await Promise.all(out.servers.map(probeOne));
 
+          // Skip the write when the ONLY difference from the last committed snapshot is timing
+          // (checkedAt/latencyMs/serverTime). The "Commit if changed" step then sees a clean diff
+          // and skips both the commit and the Pages deploy — quiet hours cost zero deploys, peak
+          // hours deploy fresh numbers.
+          const stripTimes = (o) => {
+            const c = JSON.parse(JSON.stringify(o));
+            delete c.serverTime;
+            (c.servers || []).forEach((s) => { if (s.status) { delete s.status.checkedAt; delete s.status.latencyMs; } });
+            return c;
+          };
+          let prev = null;
+          try { prev = JSON.parse(fs.readFileSync('site/data/servers-snapshot.json', 'utf8')); } catch {}
+          if (prev && JSON.stringify(stripTimes(prev)) === JSON.stringify(stripTimes(out))) {
+            console.log('snapshot unchanged (ignoring timestamps); skipping rewrite/commit/deploy');
+            process.exit(0);
+          }
           fs.writeFileSync('site/data/servers-snapshot.json', JSON.stringify(out));
           console.log('snapshot written:', out.servers.length, 'servers from', out.snapshotSource);
           })();
