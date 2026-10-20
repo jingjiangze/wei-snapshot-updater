@@ -1,9 +1,8 @@
 name: update-snapshot # triggers: schedule + dispatch
 
 # 每半小时拉一次上游服务器列表，更新静态快照并重新部署 Pages。
-# 快照是前端在实时 API 不可用时的兜底数据源（见 wei-replica 的 app.js refresh()）。
-# FORCED_ONLINE：上游/CF 边缘探测够不到的服（三服、六服），由 Actions runner 直探真值后强制绿，
-# 名单与 wei-replica functions/api/_lib.js 的同名常量保持一致。
+# 快照即「列表」唯一数据源（前端不再走 /api/servers），pin 一律绿 + 并行直探真实人数。
+# Workers/Pages Functions 只留给后台管理与投票。
 on:
   schedule:
     - cron: '*/30 * * * *'
@@ -51,12 +50,13 @@ jobs:
             snapshotSource: process.env.SRC || 'unknown',
           };
 
-          // ---- FORCED_ONLINE pin（与 _lib.js 同一批 id）----
-          const FORCED_ONLINE = new Set(['8b8c624a6a525a67', 'server-4']);
-          for (const s of out.servers) {
-            if (!FORCED_ONLINE.has(s.id)) continue;
-            let real = null;
-            let latencyMs = null;
+          // ---- pin: 全部服务器 ----
+          // 列表展示层已改为「快照即数据源」，实时 API 与本地探测都不再参与；任何服务器只要
+          // healthz 探不到（出口被拦、跨墙超时、CF 故障…）都不应再把「探不到」显示成离线。
+          // 因此对每一台：并行直探真值（runner 出口，国内/海外服都够得到），徽章一律绿；
+          // 探到 → 带真实 online/rooms/matches；探不到 → 数字保持上游原值或 0（不编造人数）。
+          const probeOne = async (s) => {
+            let real = null; let latencyMs = null;
             try {
               const base = String(s.url || '').endsWith('/') ? String(s.url || '') : String(s.url || '') + '/';
               const path = String(s.statusPath || '/healthz');
@@ -76,12 +76,8 @@ jobs:
             }
             s.status = {
               ...(s.status || {}),
-              state: 'online',
-              error: null,
-              httpStatus: null,
-              forced: true,
-              checkedAt: Date.now(),
-              latencyMs,
+              state: 'online', error: null, httpStatus: null, forced: true,
+              checkedAt: Date.now(), latencyMs,
               countKind: (s.status && s.status.countKind) || 'connections',
             };
             if (real) {
@@ -89,13 +85,15 @@ jobs:
               s.status.rooms = Number(real.rooms ?? 0) || 0;
               s.status.matches = Number(real.matches ?? 0) || 0;
               if (real.app) s.status.version = real.app;
-              console.log('pin', s.id, 'real:', JSON.stringify({ online: s.status.online, rooms: s.status.rooms, matches: s.status.matches, latencyMs }));
+              console.log('pin', s.id, s.title, 'real:', JSON.stringify({ online: s.status.online, rooms: s.status.rooms, matches: s.status.matches, latencyMs }));
             } else {
-              console.log('pin', s.id, 'forced green (real probe unavailable)');
+              if (s.status.online == null) s.status.online = 0;
+              console.log('pin', s.id, s.title, 'green (no real probe)');
             }
             if (Array.isArray(s.history24h)) s.history24h = s.history24h.map(([t, on]) => [t, on ?? 1, 1]);
             s.uptime24h = 100;
-          }
+          };
+          await Promise.all(out.servers.map(probeOne));
 
           fs.writeFileSync('site/data/servers-snapshot.json', JSON.stringify(out));
           console.log('snapshot written:', out.servers.length, 'servers from', out.snapshotSource);
