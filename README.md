@@ -19,3 +19,4 @@ GitHub Actions 每 30 分钟：拉上游（主源 `http://121.4.51.247`，备源
 ## Secrets
 - `CF_API_TOKEN`：Pages 部署权限的 CF API Token
 - `CF_ACCOUNT_ID`：CF 账户 ID
+# repo: wei-snapshot-updater
