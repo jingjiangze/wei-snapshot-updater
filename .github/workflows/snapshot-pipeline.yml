@@ -6,8 +6,10 @@ name: update-snapshot # triggers: schedule + dispatch
 # Workers/Pages Functions 只留给后台管理与投票。
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: {}
+  repository_dispatch:
+    types: [admin-save]
 
 permissions:
   contents: write
@@ -23,6 +25,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Fetch upstream and refresh snapshot
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
         run: |
           set -euo pipefail
           # 主源：上游 IP 直连（GitHub 机房可访问裸 IP，无 CF 的 403 限制）
@@ -50,6 +55,44 @@ jobs:
             snapshot: true,
             snapshotSource: process.env.SRC || 'unknown',
           };
+
+          // ---- our KV config is AUTHORITATIVE over upstream ----
+          // The admin backend writes to CF KV; the upstream IP knows nothing about those edits, so
+          // merging only the other way round makes a save invisible until upstream happens to agree.
+          // Overlay our records onto upstream's list: same id → keep our title/region/maintainer/notes/
+          // tags/url/statusPath/enabled/order (upstream supplies nothing but live status), upstream-only
+          // ids stay (十服 etc.), our-only ids are appended. Best-effort: no token/no KV = unchanged.
+          try {
+            const NS = '2602ec2630514725a31d115c0aa9fb1b';
+            const r = await fetch(`https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/storage/kv/namespaces/${NS}/values/config`, {
+              headers: { authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}` },
+              signal: AbortSignal.timeout(15000),
+            });
+            if (r.ok) {
+              const doc = await r.json();
+              const ours = Array.isArray(doc?.servers) ? doc.servers : [];
+              if (ours.length) {
+                const byId = new Map(ours.map((s) => [s.id, s]));
+                for (const s of out.servers) {
+                  const mine = byId.get(s.id);
+                  if (!mine) continue;
+                  byId.delete(s.id);
+                  // Our editable fields win; upstream's live status survives under the same id.
+                  for (const k of ['title', 'region', 'maintainer', 'version', 'notes', 'notice', 'url', 'tags', 'statusPath', 'enabled', 'order']) {
+                    if (mine[k] !== undefined) s[k] = mine[k];
+                  }
+                  console.log('kv override applied:', s.id);
+                }
+                for (const s of byId.values()) { out.servers.push(s); console.log('kv-only entry appended:', s.id); }
+                out.servers.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+                console.log('kv merge:', ours.length, 'local records; list now', out.servers.length);
+              }
+            } else {
+              console.log('kv read skipped (status', r.status + ') — upstream list used as-is');
+            }
+          } catch (err) {
+            console.log('kv read failed (', String((err && err.message) || err).slice(0, 80), ') — upstream list used as-is');
+          }
 
           // ---- pin: 全部服务器 ----
           // 列表展示层已改为「快照即数据源」，实时 API 与本地探测都不再参与；任何服务器只要
