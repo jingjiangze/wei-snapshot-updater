@@ -32,9 +32,13 @@ jobs:
           set -euo pipefail
           # 主源：上游 IP 直连（GitHub 机房可访问裸 IP，无 CF 的 403 限制）
           # 备源：上游域名（走 CF，链路更稳时用它）
-          if curl -fsS --max-time 20 "http://121.4.51.247/api/servers" -o /tmp/up.json; then
+          # Retry transient upstream failures (504 / connection refused / timeout). There were no
+          # retries at all before: one 504 from the origin froze the snapshot for that whole tick
+          # (observed 2026-10-26 12:17Z -> run 40321377147).
+          CURL_OPTS="-fsS --connect-timeout 5 --max-time 20 --retry 3 --retry-delay 2 --retry-connrefused"
+          if curl $CURL_OPTS "http://121.4.51.247/api/servers" -o /tmp/up.json; then
             SRC="http://121.4.51.247 (origin direct)"
-          elif curl -fsS --max-time 20 "https://wei.isomer319.xyz/api/servers" -o /tmp/up.json; then
+          elif curl $CURL_OPTS "https://wei.isomer319.xyz/api/servers" -o /tmp/up.json; then
             SRC="https://wei.isomer319.xyz (domain)"
           else
             echo "::warning::both upstream sources unreachable; keeping existing snapshot"
@@ -45,8 +49,10 @@ jobs:
           const fs = require('fs');
           const up = JSON.parse(fs.readFileSync('/tmp/up.json', 'utf8'));
           if (!Array.isArray(up.servers) || !up.servers.length) {
-            console.error('upstream payload has no servers; aborting without writing');
-            process.exit(1);
+            // Same outcome as "unreachable": keep the previous snapshot. This used to exit 1, so a
+            // reachable-but-empty upstream turned the run red while still changing nothing.
+            console.log('::error::upstream payload has no servers; keeping existing snapshot');
+            process.exit(0);
           }
           const out = {
             servers: up.servers,
@@ -180,6 +186,7 @@ jobs:
             (c.servers || []).forEach((s) => {
               if (s.status) { delete s.status.checkedAt; delete s.status.latencyMs; }
               delete s.probeHistory24h; delete s.probeUptime24h;
+              delete s.uptime7d; // not rendered by app.js — pure decimal jitter (82.5 -> 82.4)
             });
             return c;
           };
@@ -193,6 +200,24 @@ jobs:
           const contentSame = prev && JSON.stringify(stripTimes(prev)) === JSON.stringify(stripTimes(out));
           if (contentSame && !tallyAdvanced) {
             console.log('snapshot unchanged (content stable, bucket already sampled); skipping rewrite/commit/deploy');
+            process.exit(0);
+          }
+
+          // ---- publish throttle: at most one deploy per THROTTLE_MIN minutes ----
+          // Live counters (status.online/rooms/matches, history24h, uptime24h) really do change on
+          // every poll, so gating on content equality alone published ~288x/day (user decision
+          // 2026-10-26: settle for ~10 min). A STRUCTURAL change — a server added/removed, or any
+          // admin-editable field — always publishes immediately.
+          const structural = (o) => JSON.stringify((o && o.servers ? o.servers : []).map((s) => ({
+            id: s.id, title: s.title, url: s.url, statusPath: s.statusPath, enabled: s.enabled,
+            order: s.order, version: s.version, region: s.region, maintainer: s.maintainer,
+            tags: s.tags, notice: s.notice, notes: s.notes,
+          })));
+          const THROTTLE_MIN = 10;
+          const structuralChanged = !prev || structural(prev) !== structural(out);
+          const sincePublishMin = (Date.now() - (Number(prev && prev.serverTime) || 0)) / 60000;
+          if (!structuralChanged && sincePublishMin < THROTTLE_MIN) {
+            console.log(`throttled: ${sincePublishMin.toFixed(1)} min since last publish (<${THROTTLE_MIN}); live-counter drift not published`);
             process.exit(0);
           }
           fs.writeFileSync('site/data/servers-snapshot.json', JSON.stringify(out));
