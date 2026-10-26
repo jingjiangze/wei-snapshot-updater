@@ -213,7 +213,9 @@ jobs:
             order: s.order, version: s.version, region: s.region, maintainer: s.maintainer,
             tags: s.tags, notice: s.notice, notes: s.notes,
           })));
-          const THROTTLE_MIN = 10;
+          // Must stay below the Worker cron period (api-worker: */10) so a run always publishes;
+          // otherwise an early run is throttled and the next one lands a full period late.
+          const THROTTLE_MIN = 8;
           const structuralChanged = !prev || structural(prev) !== structural(out);
           const sincePublishMin = (Date.now() - (Number(prev && prev.serverTime) || 0)) / 60000;
           if (!structuralChanged && sincePublishMin < THROTTLE_MIN) {
