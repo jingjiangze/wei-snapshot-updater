@@ -189,9 +189,9 @@ async function loadThanks(){
  try{data=await (await fetch('/data/thanks.json',{cache:'force-cache'})).json();}catch{}
  if(!data||!Array.isArray(data.names)||!data.names.length)return;
  paintThanks(data);
- // 静默刷新：仅当上游版本更新时才替换，避免无谓重绘。
+ // 静默刷新：仅当上游版本更新时才替换，避免无谓重绘。（超时同理：上游挂住不该拖住页面。）
  try{
-  const remote=await (await fetch(THANKS_URL,{cache:'no-store'})).json();
+  const remote=await (await fetch(THANKS_URL,{cache:'no-store',signal:AbortSignal.timeout(10000)})).json();
   if(remote&&Array.isArray(remote.names)&&remote.names.length&&remote.v!==data.v)paintThanks(remote);
  }catch{}
 }
@@ -248,8 +248,13 @@ function paint(d,fromCache){
 // retries every RETRY_MS (10s) until the snapshot answers, so a flaky operator link heals in seconds
 // instead of leaving "服务暂时不可用" on screen until the next 30s tick.
 let snapshotWarned=false,snapshotFails=0;
+// A stalled TCP connection never rejects, so with no timeout the very first snapshot request can hang
+// forever: `busy` stays true, every retry tick short-circuits, and the list sits on "正在查询状态…"
+// until the visitor reloads. Observed 2026-10-26 in the in-app browser on a degraded link.
+// AbortSignal.timeout turns a stall into an ordinary failure, which the retry loop already handles.
+const SNAPSHOT_TIMEOUT_MS=15000;
 async function refresh(){if(busy||voting.size)return;busy=true;$('refresh').disabled=true;$('refresh').classList.add('spin');try{
- const r=await fetch('/data/servers-snapshot.json',{cache:'no-store'});
+ const r=await fetch('/data/servers-snapshot.json',{cache:'no-store',signal:AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)});
  if(!r.ok)throw Error('快照不可用');
  const d=await r.json();
  if(!d||!Array.isArray(d.servers)||!d.servers.length)throw Error('快照为空');
