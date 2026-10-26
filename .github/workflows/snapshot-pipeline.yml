@@ -216,6 +216,21 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # ?v= must never be reused: Cloudflare serves /app.js with `immutable` and a stale copy
+      # cached under a given query string survives a deploy. Derive it from the file hash instead.
+      - name: Stamp asset version
+        if: steps.commit.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          node -e '
+          const fs=require("fs"),crypto=require("crypto");
+          const v="h"+crypto.createHash("sha1").update(fs.readFileSync("site/app.js")).digest("hex").slice(0,8);
+          const src=fs.readFileSync("site/index.html","utf8");
+          const hits=(src.match(/\/app\.js\?v=[^"]*/g)||[]).length;
+          if(hits!==1){console.error("stamp: expected 1 app.js?v= anchor, found "+hits);process.exit(1);}
+          const out=src.replace(/\/app\.js\?v=[^"]*/g,"/app.js?v="+v);
+          if(out!==src){fs.writeFileSync("site/index.html",out);console.log("stamped app.js?v="+v);}
+          else{console.log("asset version already "+v);}
+          '
       - name: Deploy to Cloudflare Pages
         if: steps.commit.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
         env:
