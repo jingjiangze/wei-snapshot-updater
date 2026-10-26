@@ -52,30 +52,57 @@ async function copyUrl(url){
  return copied;
 }
 function history(server){
- const box=element('div',null,'rl-history');const samples=(server.history24h||[]).filter(p=>p[2]!=null).length;
- const heading=element('div',null,'rl-hhead');heading.append(element('span','24小时在线情况'),element('strong',samples&&server.uptime24h!=null?server.uptime24h+'% 在线':'尚无采样'));
+ const box=element('div',null,'rl-history');
+ // Prefer OUR OWN probe tally (probeHistory24h, produced by the snapshot Actions runner) over the
+ // upstream's history: upstream's numbers are mirrored AND our pin forces uptime to 100%, so only
+ // our own tally can show "we actually failed to reach this server". Falls back to upstream's when
+ // the probe series is not there yet (fresh installs / older snapshots).
+ const own=Array.isArray(server.probeHistory24h)&&server.probeHistory24h.length?server.probeHistory24h.map(([ts,n,ok])=>[ts,null,n?Math.min(1,ok/n):null]):null;
+ const series=own||server.history24h;
+ const uptime=own?server.probeUptime24h:server.uptime24h;
+ const samples=(series||[]).filter(p=>p[2]!=null).length;
+ const heading=element('div',null,'rl-hhead');heading.append(element('span',own?'24小时在线情况（本站探测）':'24小时在线情况'),element('strong',samples&&uptime!=null?uptime+'% 在线':'尚无采样'));
  const bars=element('div',null,'rl-bars');bars.setAttribute('role','img');bars.setAttribute('aria-label','最近24小时在线情况，绿色在线、黄色部分可用、红色未连通、灰色未采集');
- (server.history24h||Array.from({length:48},()=>[null,null,null])).forEach((p,i)=>{
+ (series||Array.from({length:48},()=>[null,null,null])).forEach((p,i)=>{
   const state=p[2]==null?'unknown':p[2]>=.99?'up':p[2]<=.01?'down':'partial';const bar=element('span',null,'rl-bar '+state);bar.style.setProperty('--b',i);
   bar.title=(p[0]?new Date(p[0]).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})+' · ':'')+(p[2]==null?'未采集':Math.round(p[2]*100)+'% 检测可用')+(p[1]!=null?' · 峰值 '+p[1]+' 人':'');bars.append(bar);
  });
  const labels=element('div',null,'rl-hlabels');labels.append(element('span','24小时前'),element('span','现在'));
- box.append(heading,bars,labels);if(samples<48)box.append(element('small','灰色为未采集时段；在线率按已采样数据计算。','rl-hnote'));return box;
+ box.append(heading,bars,labels);
+ if(samples<(series||[]).length)box.append(element('small',own?'本站每 30 分钟探测一次；灰色为未采集时段，在线率按已采样数据计算。':'灰色为未采集时段；在线率按已采样数据计算。','rl-hnote'));
+ return box;
 }
 function rating(server){
- const panel=element('div',null,'rl-rating');const r=server.rating||{large:0,medium:0};const heading=element('div',null,'rl-rhead');heading.append(element('span','玩家评分'),element('small',(r.large+r.medium)+' 票'));
- const buttons=element('div',null,'rl-votes');const feedback=element('div','每个浏览器一票，可修改选择','rl-vfeed');feedback.setAttribute('role','status');
+ const panel=element('div',null,'rl-rating');const r0=server.rating||{large:0,medium:0};
+ const heading=element('div',null,'rl-rhead');heading.append(element('span','玩家评分'),element('small',(r0.large+r0.medium)+' 票'));
+ const buttons=element('div',null,'rl-votes');const feedback=element('div','每个浏览器一票，当天首次选择即记录','rl-vfeed');feedback.setAttribute('role','status');
+ // QUOTA UI (owner rule 2026-10-21, KV free tier = 1000 writes/day red line): a click ALWAYS shows
+ // success instantly (optimistic). The POST goes out at most ONCE per UTC day per server (localStorage
+ // gate here; the server caps at ≤1 KV write per browser+server+day regardless). Same-day changes are
+ // display-only until the next day's click re-syncs.
+ const DAY=new Date().toISOString().slice(0,10);const SENT='rl-vote-day:'+server.id;
+ // Local record of MY pick today (the snapshot is anonymous, so selection highlight needs this).
+ const MINE='rl-vote-mine:'+server.id;
+ const localMine=()=>{try{const j=JSON.parse(localStorage.getItem(MINE)||'null');return j&&j.d===DAY&&(j.c==='large'||j.c==='medium')?j.c:null}catch{return null}};
+ const votedToday=()=>{try{return localStorage.getItem(SENT)===DAY}catch{return false}};
+ const markSent=(c)=>{try{localStorage.setItem(SENT,DAY);localStorage.setItem(MINE,JSON.stringify({d:DAY,c}))}catch{}};
+ const counts={large:Math.max(0,r0.large|0),medium:Math.max(0,r0.medium|0)};let mine=localMine()||r0.mine||null;
+ const LABEL={large:'超大杯',medium:'中杯'};
+ const sync=(bump)=>{for(const [i,key]of ['large','medium'].entries()){const b=buttons.children[i];if(!b)continue;const num=b.querySelector('strong');const changed=num.textContent!==String(counts[key]);b.classList.toggle('selected',mine===key);b.setAttribute('aria-pressed',String(mine===key));num.textContent=counts[key];if((changed||key===mine)&&bump){b.classList.remove('bump');void b.offsetWidth;b.classList.add('bump');}}heading.querySelector('small').textContent=(counts.large+counts.medium)+' 票';};
  for(const [choice,label]of [['large','超大杯'],['medium','中杯']]){
-  const button=element('button',null,'rl-vote'+(r.mine===choice?' selected':''));button.type='button';button.setAttribute('aria-pressed',String(r.mine===choice));button.append(element('span',label),element('strong',String(r[choice]||0)));button.disabled=voting.has(server.id);
-  button.addEventListener('click',async()=>{
-   voting.add(server.id);for(const b of buttons.children)b.disabled=true;feedback.textContent='提交中…';
-   try{const res=await fetch('/api/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:server.id,choice})});const d=await res.json();if(!res.ok)throw Error(d.error||'投票失败');server.rating=d.rating;
-    for(const [i,key]of ['large','medium'].entries()){const b=buttons.children[i],num=b.querySelector('strong'),changed=num.textContent!==String(d.rating[key]);b.classList.toggle('selected',d.rating.mine===key);b.setAttribute('aria-pressed',String(d.rating.mine===key));num.textContent=d.rating[key];if(changed){num.classList.remove('bump');void num.offsetWidth;num.classList.add('bump');}}
-    button.classList.remove('pulse');void button.offsetWidth;button.classList.add('pulse');
-    heading.querySelector('small').textContent=(d.rating.large+d.rating.medium)+' 票';feedback.textContent='已选择'+label+'，可再次修改';}
-   catch(e){feedback.textContent=e.message;}
-   finally{voting.delete(server.id);for(const b of buttons.children)b.disabled=false;}
-  });buttons.append(button);
+  const button=element('button',null,'rl-vote'+(mine===choice?' selected':''));button.type='button';button.setAttribute('aria-pressed',String(mine===choice));button.append(element('span',label),element('strong',String(counts[choice])));
+  button.addEventListener('click',()=>{
+   if(mine===choice)return;
+   const prev=mine;if(prev)counts[prev]=Math.max(0,counts[prev]-1);counts[choice]+=(1|0);mine=choice;
+   sync(true);feedback.textContent='已选择'+label+'，感谢！';
+   if(votedToday())return;markSent(choice);
+   fetch('/api/vote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:server.id,choice})}).then(async(res)=>{
+    const d=await res.json().catch(()=>null);if(!res.ok||!d||!d.rating)return;
+    counts.large=d.rating.large|0;counts.medium=d.rating.medium|0;mine=d.rating.mine||null;sync(false);
+    feedback.textContent=d.rating.sameDay&&mine?'今天已记录「'+LABEL[mine]+'」，改选明天生效':'已记录，感谢！';
+   }).catch(()=>{/* optimistic display stands; nothing was written today */});
+  });
+  buttons.append(button);
  }
  panel.append(heading,buttons,feedback);return panel;
 }
@@ -207,28 +234,36 @@ function paint(d,fromCache){
  const available=servers.filter(s=>s.status?.state==='online').length;
  if(first){first=false;whenReady(()=>{countUp($('available'),available);countUp($('listed'),servers.length);scramble($('searching').querySelector('b'),'NODES FOUND · '+String(servers.length).padStart(2,'0'),600);});}
  else{$('available').textContent=available;$('listed').textContent=servers.length;}
+ // The label shows the DATA's own timestamp, and says "缓存" only when it is served from
+ // localStorage (snapshot fetch failed) — never when the fresh payload lands.
  $('updated').textContent=(fromCache?'已更新（缓存） ':'已更新 ')+new Date(d.serverTime).toLocaleTimeString('zh-CN',{hour12:false});
  $('error').classList.add('hidden');updateHud();
 }
-// Snapshot fallback: /data/servers-snapshot.json is a static copy of the last good payload. It keeps
-// the directory readable when the API itself is unreachable (e.g. the 2026-10-20 account-wide Pages
-// Functions outage, where /api/* answered text/html and r.json() threw "Unexpected end of JSON input").
-let snapshotTried=false;
+// Snapshot is now the LIST'S ONLY SOURCE (Workers/Pages Functions are reserved for admin + vote).
+// /data/servers-snapshot.json is refreshed every 10 min by GitHub Actions (wei-snapshot-updater),
+// which also probes each server for real online/rooms/matches and pins them green. Static edge-cached
+// JSON: zero Function calls, zero quota, immune to CF Functions/Workers outages.
+// localStorage (≤24h) still gives an instant first paint on slow links before the snapshot lands.
+// Retry policy: a failed fetch does NOT clear the rendered list; it keeps serving localStorage and
+// retries every RETRY_MS (10s) until the snapshot answers, so a flaky operator link heals in seconds
+// instead of leaving "服务暂时不可用" on screen until the next 30s tick.
+let snapshotWarned=false,snapshotFails=0;
 async function refresh(){if(busy||voting.size)return;busy=true;$('refresh').disabled=true;$('refresh').classList.add('spin');try{
- const r=await fetch('/api/servers',{cache:'no-store'});
- const ct=r.headers.get('content-type')||'';
- if(!r.ok||!ct.includes('json'))throw Error('服务暂时不可用，请稍后刷新');
- const d=await r.json();if(!d||!Array.isArray(d.servers))throw Error('服务暂时不可用，请稍后刷新');
- cachePut(d);paint(d,false);
+ const r=await fetch('/data/servers-snapshot.json',{cache:'no-store'});
+ if(!r.ok)throw Error('快照不可用');
+ const d=await r.json();
+ if(!d||!Array.isArray(d.servers)||!d.servers.length)throw Error('快照为空');
+ cachePut(d);paint(d,false);$('error').classList.add('hidden');snapshotWarned=false;snapshotFails=0;
  }catch(e){
-  // One-shot snapshot fallback: render the static copy and say so, instead of an empty page.
-  if(!snapshotTried){snapshotTried=true;
-   try{const s=await fetch('/data/servers-snapshot.json',{cache:'no-store'});if(s.ok){const d=await s.json();
-    if(d&&Array.isArray(d.servers)&&d.servers.length){paint(d,true);$('error').textContent='实时接口暂不可用，当前显示最近一次快照（'+new Date(d.serverTime).toLocaleString('zh-CN',{hour12:false})+'）';$('error').classList.remove('hidden');return;}}
-   }catch{}}
-  $('error').textContent=e.message;$('error').classList.remove('hidden');
+  // Snapshot unreachable (rare): keep whatever localStorage has, and say so without hiding the data.
+  const cached=cacheGet();
+  if(cached&&!snapshotWarned){snapshotWarned=true;paint(cached.d,true);$('error').textContent='实时快照获取失败，先显示本机缓存（数据时间 '+new Date(cached.d.serverTime).toLocaleTimeString('zh-CN',{hour12:false})+'），正在自动重试';$('error').classList.remove('hidden');}
+  else if(!cached){$('error').textContent='数据暂时不可用，正在重试';$('error').classList.remove('hidden');}
+  else{$('error').textContent='实时快照获取失败，正在自动重试';$('error').classList.remove('hidden');}
  }finally{busy=false;$('refresh').disabled=false;setTimeout(()=>$('refresh').classList.remove('spin'),500);}}
-$('refresh').addEventListener('click',refresh);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});setInterval(()=>{if(!document.hidden)refresh();},30000);
+$('refresh').addEventListener('click',refresh);document.addEventListener('visibilitychange',()=>{if(!document.hidden)refresh();});
+// 10s poll; when the snapshot is failing, retry faster (every 5s) so recovery is felt immediately.
+setInterval(()=>{if(!document.hidden&&!busy&&!voting.size){if(snapshotWarned){if(++snapshotFails%2===0)refresh();}else refresh();}},5000);
 
 // ---------- scroll HUD: lime dot follows progress, side label names the row in view ----------
 let hudText='',ticking=false;
